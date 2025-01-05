@@ -34,7 +34,7 @@ def gpt_orchestrator(objective, file_content=None, previous_results=None, use_se
     if use_search:
         messages.append({"role": "user", "content": "Please also generate a JSON object containing a single 'search_query' key, which represents a question that, when asked online, would yield important information for solving the subtask. The question should be specific and targeted to elicit the most relevant and helpful resources. Format your JSON like this, with no additional text before or after:\n{\"search_query\": \"<question>\"}\n"})
 
-    gpt_response = completion.create(
+    gpt_response = client.chat.completions.create(
         model=ORCHESTRATOR_MODEL,
         messages=messages,
         max_tokens=4096
