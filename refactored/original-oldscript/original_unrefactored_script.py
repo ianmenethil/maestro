@@ -4,56 +4,32 @@ from rich.console import Console
 from rich.panel import Panel
 from datetime import datetime
 import json
-from openai import OpenAI
-from anthropic import Anthropic
+from litellm import completion
 from tavily import TavilyClient
 
-# Initialize OpenAI and Anthropic API clients
-openai_client = OpenAI(api_key="YOUR API KEY")
-anthropic_client = Anthropic(api_key="YOUR API KEY")
+# Set environment variables for API keys for the services you are using
+os.environ["OPENAI_API_KEY"] = "YOUR OPENAI API KEY"
+os.environ["ANTHROPIC_API_KEY"] = "YOUR ANTHROPIC API KEY"
+os.environ["GEMINI_API_KEY"] = "YOUR GEMINI API KEY"
 
-# Available OpenAI models
-ORCHESTRATOR_MODEL = "gpt-4o"
-SUB_AGENT_MODEL = "gpt-4o"
-
-# Available Claude models for Anthropic API
-REFINER_MODEL = "claude-3-opus-20240229"
+# Define the models to be used for each stage
+ORCHESTRATOR_MODEL = "gemini/gemini-1.5-flash-latest"
+SUB_AGENT_MODEL = "gemini/gemini-1.5-flash-latest"
+REFINER_MODEL = "gemini/gemini-1.5-flash-latest"
 
 # Initialize the Rich Console
 console = Console()
 
 
-def calculate_subagent_cost(model, input_tokens, output_tokens):
-    # Pricing information per model
-    pricing = {
-        "claude-3-opus-20240229": {"input_cost_per_mtok": 15.00, "output_cost_per_mtok": 75.00},
-        "claude-3-haiku-20240307": {"input_cost_per_mtok": 0.25, "output_cost_per_mtok": 1.25},
-        "claude-3-sonnet-20240229": {"input_cost_per_mtok": 3.00, "output_cost_per_mtok": 15.00},
-    }
-
-    # Calculate cost
-    input_cost = (input_tokens / 1_000_000) * pricing[model]["input_cost_per_mtok"]
-    output_cost = (output_tokens / 1_000_000) * pricing[model]["output_cost_per_mtok"]
-    total_cost = input_cost + output_cost
-
-    return total_cost
-
-
 def gpt_orchestrator(objective, file_content=None, previous_results=None, use_search=False):
-    console.print(
-        Panel(
-            f"\n[bold]Calling Orchestrator {ORCHESTRATOR_MODEL} for your objective[/bold]",
-            title="[bold green]Orchestrator[/bold green]",
-            title_align="left",
-            border_style="green"
-        ))
+    console.print(f"\n[bold]Calling Orchestrator for your objective[/bold]")
     previous_results_text = "\n".join(previous_results) if previous_results else "None"
     if file_content:
         console.print(Panel(
             f"File content:\n{file_content}", title="[bold blue]File Content[/bold blue]", title_align="left", border_style="blue"))
 
     messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "system", "content": "You are a detailed and meticulous assistant. Your primary goal is to break down complex objectives into manageable sub-tasks, provide thorough reasoning, and ensure code correctness. Always explain your thought process step-by-step and validate any code for errors, improvements, and adherence to best practices."},
         {"role": "user", "content": f"Based on the following objective{' and file content' if file_content else ''}, and the previous sub-task results (if any), please break down the objective into the next sub-task, and create a concise and detailed prompt for a subagent so it can execute that task. IMPORTANT!!! when dealing with code tasks make sure you check the code for errors and provide fixes and support as part of the next sub-task. If you find any bugs or have suggestions for better code, please include them in the next sub-task prompt. Please assess if the objective has been fully achieved. If the previous sub-task results comprehensively address all aspects of the objective, include the phrase 'The task is complete:' at the beginning of your response. If the objective is not yet fully achieved, break it down into the next sub-task and create a concise and detailed prompt for a subagent to execute that task.:\n\nObjective: {objective}" + (
             '\nFile content:\n' + file_content if file_content else '') + f"\n\nPrevious sub-task results:\n{previous_results_text}"}
     ]
@@ -61,19 +37,12 @@ def gpt_orchestrator(objective, file_content=None, previous_results=None, use_se
     if use_search:
         messages.append({"role": "user", "content": "Please also generate a JSON object containing a single 'search_query' key, which represents a question that, when asked online, would yield important information for solving the subtask. The question should be specific and targeted to elicit the most relevant and helpful resources. Format your JSON like this, with no additional text before or after:\n{\"search_query\": \"<question>\"}\n"})
 
-    gpt_response = openai_client.chat.completions.create(
-        model=ORCHESTRATOR_MODEL,
-        messages=messages,
-        max_tokens=4096
-    )
+    response = completion(model=ORCHESTRATOR_MODEL, messages=messages)
 
-    response_text = gpt_response.choices[0].message.content
-    usage = gpt_response.usage
+    response_text = response['choices'][0]['message']['content']
 
-    console.print(Panel(response_text, title=f"[bold green]gpt Orchestrator[/bold green]",
-                  title_align="left", border_style="green", subtitle="Sending task to gpt 👇"))
-    console.print(
-        f"Input Tokens: {usage.prompt_tokens}, Output Tokens: {usage.completion_tokens}, Total Tokens: {usage.total_tokens}")
+    console.print(Panel(response_text, title=f"[bold green]Orchestrator[/bold green]",
+                  title_align="left", border_style="green", subtitle="Sending task to sub-agent 👇"))
 
     search_query = None
     if use_search:
@@ -101,14 +70,18 @@ def gpt_sub_agent(prompt, search_query=None, previous_gpt_tasks=None, use_search
         previous_gpt_tasks = []
 
     continuation_prompt = "Continuing from the previous answer, please complete the response."
-    system_message = "Previous gpt tasks:\n" + \
+    system_message = (
+        "You are an expert assistant. Your goal is to execute tasks accurately, provide detailed explanations of your reasoning, "
+        "and ensure the correctness and quality of any code. Always explain your thought process and validate your output thoroughly.\n\n"
+        "Previous tasks:\n" +
         "\n".join(f"Task: {task['task']}\nResult: {task['result']}" for task in previous_gpt_tasks)
+    )
     if continuation:
         prompt = continuation_prompt
 
     qna_response = None
     if search_query and use_search:
-        tavily = TavilyClient(api_key="YOUR_API_KEY")
+        tavily = TavilyClient(api_key="your-tavily-key")
         qna_response = tavily.qna_search(query=search_query)
         console.print(f"QnA response: {qna_response}", style="yellow")
 
@@ -120,21 +93,14 @@ def gpt_sub_agent(prompt, search_query=None, previous_gpt_tasks=None, use_search
     if qna_response:
         messages.append({"role": "user", "content": f"\nSearch Results:\n{qna_response}"})
 
-    gpt_response = openai_client.chat.completions.create(
-        model=SUB_AGENT_MODEL,
-        messages=messages,
-        max_tokens=4096
-    )
+    response = completion(model=SUB_AGENT_MODEL, messages=messages)
 
-    response_text = gpt_response.choices[0].message.content
-    usage = gpt_response.usage
+    response_text = response['choices'][0]['message']['content']
 
-    console.print(Panel(response_text, title="[bold blue]gpt Sub-agent Result[/bold blue]",
-                  title_align="left", border_style="blue", subtitle="Task completed, sending result to gpt 👇"))
-    console.print(
-        f"Input Tokens: {usage.prompt_tokens}, Output Tokens: {usage.completion_tokens}, Total Tokens: {usage.total_tokens}")
+    console.print(Panel(response_text, title="[bold blue]Sub-agent Result[/bold blue]", title_align="left",
+                  border_style="blue", subtitle="Task completed, sending result to Orchestrator 👇"))
 
-    if usage.completion_tokens >= 4000:  # Threshold set to 4000 as a precaution
+    if len(response_text) >= 4000:  # Threshold set to 4000 as a precaution
         console.print("[bold yellow]Warning:[/bold yellow] Output may be truncated. Attempting to continue the response.")
         continuation_response_text = gpt_sub_agent(
             prompt, search_query, previous_gpt_tasks, use_search, continuation=True)
@@ -154,27 +120,18 @@ def anthropic_refine(objective, sub_task_results, filename, projectname, continu
         }
     ]
 
-    opus_response = anthropic_client.messages.create(
-        model=REFINER_MODEL,
-        max_tokens=4096,
-        messages=messages
-    )
+    response = completion(model=REFINER_MODEL, messages=messages)
 
-    response_text = opus_response.content[0].text.strip()
-    console.print(
-        f"Input Tokens: {opus_response.usage.input_tokens}, Output Tokens: {opus_response.usage.output_tokens}")
-    total_cost = calculate_subagent_cost(
-        REFINER_MODEL, opus_response.usage.input_tokens, opus_response.usage.output_tokens)
-    console.print(f"Refine Cost: ${total_cost:.4f}")
+    response_text = response['choices'][0]['message']['content']
+    console.print(Panel(response_text, title="[bold green]Final Output[/bold green]",
+                  title_align="left", border_style="green"))
 
-    if opus_response.usage.output_tokens >= 4000 and not continuation:  # Threshold set to 4000 as a precaution
+    if len(response_text) >= 4000 and not continuation:  # Threshold set to 4000 as a precaution
         console.print("[bold yellow]Warning:[/bold yellow] Output may be truncated. Attempting to continue the response.")
         continuation_response_text = anthropic_refine(
             objective, sub_task_results + [response_text], filename, projectname, continuation=True)
         response_text += "\n" + continuation_response_text
 
-    console.print(Panel(response_text, title="[bold green]Final Output[/bold green]",
-                  title_align="left", border_style="green"))
     return response_text
 
 
@@ -268,9 +225,12 @@ while True:
         task_exchanges.append((sub_task_prompt, sub_task_result))
         file_content_for_gpt = None
 
+# Include both orchestrator prompts and sub-agent results in sub-task results
+sub_task_results = [f"Orchestrator Prompt: {prompt}\nSub-agent Result: {result}" for prompt, result in task_exchanges]
+
 sanitized_objective = re.sub(r'\W+', '_', objective)
 timestamp = datetime.now().strftime("%H-%M-%S")
-refined_output = anthropic_refine(objective, [result for _, result in task_exchanges], timestamp, sanitized_objective)
+refined_output = anthropic_refine(objective, sub_task_results, timestamp, sanitized_objective)
 
 project_name_match = re.search(r'Project Name: (.*)', refined_output)
 project_name = project_name_match.group(1).strip() if project_name_match else sanitized_objective
